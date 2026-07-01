@@ -25,6 +25,7 @@ import {
 	killWindowsCaptureProcess,
 	registerIpcHandlers,
 } from "./ipc/handlers";
+import { stopNativeMacCaptureForQuit } from "./ipc/recording/mac";
 import { ensureMediaServer } from "./mediaServer";
 import { ensurePackagedRendererServer } from "./rendererServer";
 import type { UpdateToastPayload } from "./updater";
@@ -850,11 +851,26 @@ function createSourceSelectorWindowWrapper() {
 
 // On macOS, applications and their menu bar stay active until the user quits
 // explicitly with Cmd + Q.
-app.on("before-quit", () => {
+let quitAfterNativeCaptureStopped = false;
+app.on("before-quit", (event) => {
 	killWindowsCaptureProcess();
 	showCursor();
 	cleanupNativeVideoExportSessions();
 	void cleanupAllExportStreams();
+
+	// The ScreenCaptureKit helper only writes the moov atom (the index that
+	// makes the mp4 playable) when it receives a graceful "stop". Killing it
+	// outright — which is what used to happen here — leaves a huge unplayable
+	// mdat-only file. Give it a bounded window to finish writing first.
+	if (!quitAfterNativeCaptureStopped) {
+		event.preventDefault();
+		stopNativeMacCaptureForQuit()
+			.catch(() => undefined)
+			.finally(() => {
+				quitAfterNativeCaptureStopped = true;
+				app.quit();
+			});
+	}
 });
 
 app.on("window-all-closed", () => {

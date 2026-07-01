@@ -595,6 +595,10 @@ final class RecorderService {
 	private let recorder = ScreenCaptureRecorder()
 	private let queue = DispatchQueue(label: "recordly.screencapturekit.commands")
 	private let completionGroup = DispatchGroup()
+	// Guards against finishCapture()/finishWriting() being triggered twice
+	// (e.g. an explicit "stop" racing a termination signal), which would
+	// over-release completionGroup and crash the helper.
+	private var stopRequested = false
 
 	func start(configJSON: String) {
 		completionGroup.enter()
@@ -613,6 +617,8 @@ final class RecorderService {
 
 	func stop() {
 		queue.async {
+			guard !self.stopRequested else { return }
+			self.stopRequested = true
 			Task {
 				do {
 					let outputPath = try await self.recorder.stopCapture()
@@ -695,6 +701,28 @@ if let configData = CommandLine.arguments[1].data(using: .utf8),
 let service = RecorderService()
 service.start(configJSON: CommandLine.arguments[1])
 
+// Trap termination signals instead of dying immediately: the default
+// disposition would kill this process mid-write, leaving mdat with all the
+// captured samples but no moov atom (an unplayable file). Route the signal
+// through a DispatchSourceSignal so finishCapture()/finishWriting() can run
+// on the normal GCD queue rather than inside an async-signal-unsafe handler.
+// This still cannot help against SIGKILL or a power loss — only signals that
+// can be trapped at all.
+signal(SIGTERM, SIG_IGN)
+signal(SIGINT, SIG_IGN)
+
+let terminationSignalSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+terminationSignalSource.setEventHandler {
+	service.stop()
+}
+terminationSignalSource.resume()
+
+let interruptSignalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+interruptSignalSource.setEventHandler {
+	service.stop()
+}
+interruptSignalSource.resume()
+
 DispatchQueue.global(qos: .utility).async {
 	while let input = readLine(strippingNewline: true)?.lowercased() {
 		if input == "pause" {
@@ -712,6 +740,12 @@ DispatchQueue.global(qos: .utility).async {
 			break
 		}
 	}
+
+	// readLine() returned nil: stdin closed, which happens when the parent
+	// Electron process exits or is killed without sending "stop" first.
+	// Finalize anyway so the moov atom still gets written; RecorderService.stop()
+	// is idempotent, so this is a no-op if "stop" already ran above.
+	service.stop()
 }
 
 service.waitUntilFinished()

@@ -9,6 +9,7 @@ import {
 	lastNativeCaptureDiagnostics,
 	nativeCaptureMicrophonePath,
 	nativeCaptureOutputBuffer,
+	nativeCaptureProcess,
 	nativeCaptureStopRequested,
 	nativeCaptureSystemAudioPath,
 	nativeCaptureTargetPath,
@@ -111,6 +112,42 @@ export function waitForNativeCaptureStop(process: ChildProcessWithoutNullStreams
 		process.once("close", onClose);
 		process.once("error", onError);
 	});
+}
+
+/**
+ * Gives an in-progress ScreenCaptureKit recording a bounded chance to finish
+ * writing (moov atom included) before the app quits, instead of the helper
+ * being killed outright. Mirrors the "stop\n" handshake used by the normal
+ * stop-native-screen-recording flow, but with a timeout so app quit can't
+ * hang forever if the helper doesn't respond.
+ */
+export async function stopNativeMacCaptureForQuit(timeoutMs = 5000): Promise<void> {
+	const process = nativeCaptureProcess;
+	if (!process || !nativeScreenRecordingActive) {
+		return;
+	}
+
+	setNativeCaptureStopRequested(true);
+	const stopped = waitForNativeCaptureStop(process).catch(() => undefined);
+
+	try {
+		process.stdin.write("stop\n");
+	} catch {
+		/* helper's stdin may already be closed; fall through to the timeout/kill below */
+	}
+
+	await Promise.race([stopped, new Promise((resolve) => setTimeout(resolve, timeoutMs))]);
+
+	if (nativeCaptureProcess === process) {
+		try {
+			process.kill();
+		} catch {
+			/* ignore */
+		}
+		setNativeCaptureProcess(null);
+	}
+	setNativeScreenRecordingActive(false);
+	setNativeCaptureStopRequested(false);
 }
 
 export async function muxNativeMacRecordingWithAudio(
