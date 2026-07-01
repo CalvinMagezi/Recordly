@@ -705,19 +705,25 @@ service.start(configJSON: CommandLine.arguments[1])
 // disposition would kill this process mid-write, leaving mdat with all the
 // captured samples but no moov atom (an unplayable file). Route the signal
 // through a DispatchSourceSignal so finishCapture()/finishWriting() can run
-// on the normal GCD queue rather than inside an async-signal-unsafe handler.
+// on a normal GCD queue rather than inside an async-signal-unsafe handler.
 // This still cannot help against SIGKILL or a power loss — only signals that
 // can be trapped at all.
+//
+// Deliberately NOT queue: .main — the main thread spends its life blocked in
+// service.waitUntilFinished()'s synchronous DispatchGroup.wait() below, which
+// does not pump the main queue, so a source scheduled there would never fire.
+let signalHandlingQueue = DispatchQueue(label: "recordly.screencapturekit.signals")
+
 signal(SIGTERM, SIG_IGN)
 signal(SIGINT, SIG_IGN)
 
-let terminationSignalSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+let terminationSignalSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: signalHandlingQueue)
 terminationSignalSource.setEventHandler {
 	service.stop()
 }
 terminationSignalSource.resume()
 
-let interruptSignalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+let interruptSignalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalHandlingQueue)
 interruptSignalSource.setEventHandler {
 	service.stop()
 }
